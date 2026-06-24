@@ -9,7 +9,7 @@ import math
 from scipy.spatial.transform import Rotation
 from .spatialmath import quaternion_to_orientation_vector
 
-from typing import (Any, ClassVar, Dict, List, Mapping, Optional, Sequence, cast)
+from typing import (Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple, cast)
 from typing_extensions import Self
 
 from viam.components.pose_tracker import PoseTracker
@@ -20,7 +20,9 @@ from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Geometry, PoseInFrame, Pose, ResourceName
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
-from viam.resource.types import Model, ModelFamily
+from viam.resource.registry import Registry
+from viam.resource.types import Model, ModelFamily, RESOURCE_TYPE_COMPONENT, RESOURCE_TYPE_SERVICE
+from viam.errors import ResourceNotFoundError
 from viam.logging import getLogger
 from viam.utils import struct_to_dict, ValueTypes
 from viam.media.utils.pil import viam_to_pil_image
@@ -35,34 +37,45 @@ width_attr = "tag_width_mm"
 LOGGER = getLogger(__name__)
 
 
+class ApriltagModule(Module):
+    """Module wrapper that resolves dependencies without a full parent refresh.
+
+    The default Module._get_resource calls parent.refresh(), which tries to
+    remove every resource that was disabled in the machine config. On older
+    viam-sdk versions that can KeyError for resources this module never cached
+    (for example an unrelated disabled gripper), causing apriltag reconfigure to
+    fail even though it only depends on its camera.
+    """
+
+    async def _get_resource(self, name: ResourceName) -> ResourceBase:
+        await self._connect_to_parent()
+        assert self.parent is not None
+
+        if name.type == RESOURCE_TYPE_COMPONENT:
+            getter = self.parent.get_component
+        elif name.type == RESOURCE_TYPE_SERVICE:
+            getter = self.parent.get_service
+        else:
+            raise ValueError("Dependency does not describe a component nor a service")
+
+        try:
+            return getter(name)
+        except ResourceNotFoundError:
+            await self.parent._create_or_reset_client(name)
+            return getter(name)
+
+
 class Apriltag(PoseTracker, EasyResource):
-    MODEL: ClassVar[Model] = Model(ModelFamily("viam", "apriltag"), "pose_tracker")
+    MODEL: ClassVar[Model] = Model(ModelFamily("sucrammal", "apriltag"), "pose_tracker")
 
     @classmethod
     def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
-        """This method creates a new instance of the Apriltag PoseTracker component.
-        The default implementation sets the name from the `config` parameter and then calls `reconfigure`.
-
-        Args:
-            config (ComponentConfig): The configuration for this resource
-            dependencies (Mapping[ResourceName, ResourceBase]): The dependencies (both implicit and explicit)
-
-        Returns:
-            Self: The resource
-        """
-        return super().new(config, dependencies)
+        instance = super().new(config, dependencies)
+        instance.reconfigure(config, dependencies)
+        return instance
 
     @classmethod
-    def validate_config(cls, config: ComponentConfig) -> Sequence[str]:
-        """This method allows you to validate the configuration object received from the machine,
-        as well as to return any implicit dependencies based on that `config`.
-
-        Args:
-            config (ComponentConfig): The configuration for this resource
-
-        Returns:
-            Sequence[str]: A list of implicit dependencies
-        """
+    def validate_config(cls, config: ComponentConfig) -> Tuple[Sequence[str], Sequence[str]]:
         attrs = struct_to_dict(config.attributes)
         cam = attrs.get(cam_attr)
         if cam is None:
@@ -71,20 +84,14 @@ class Apriltag(PoseTracker, EasyResource):
             raise Exception("Missing requried " + family_attr + " attribute.")
         if attrs.get(width_attr) is None:
             raise Exception("Missing requried " + width_attr + " attribute.")
-        return [str(cam)]
+        return [str(cam)], []
 
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
-        """This method allows you to dynamically update your service when it receives a new `config` object.
-
-        Args:
-            config (ComponentConfig): The new configuration
-            dependencies (Mapping[ResourceName, ResourceBase]): Any dependencies (both implicit and explicit)
-        """
         attrs = struct_to_dict(config.attributes)
-        self.camera = cast(Camera, dependencies.get(Camera.get_resource_name(str(attrs.get(cam_attr)))))
+        cam_name = str(attrs.get(cam_attr))
+        self.camera = cast(Camera, dependencies[Camera.get_resource_name(cam_name)])
         self.tag_family = attrs.get(family_attr)
         self.tag_width_mm = attrs.get(width_attr)
-        return super().reconfigure(config, dependencies)
 
     async def get_poses(
         self,
@@ -178,5 +185,12 @@ class Apriltag(PoseTracker, EasyResource):
         raise NotImplementedError()
 
 
+async def run_module():
+    module = ApriltagModule.from_args()
+    for key in Registry.REGISTERED_RESOURCE_CREATORS().keys():
+        module.add_model_from_registry(*key.split("/"))  # pyright: ignore [reportArgumentType]
+    await module.start()
+
+
 if __name__ == "__main__":
-    asyncio.run(Module.run_from_registry())
+    asyncio.run(run_module())

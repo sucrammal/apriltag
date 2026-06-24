@@ -1,13 +1,13 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
-  "module_id": "viam:apriltag",
+  "module_id": "sucrammal:apriltag",
   "visibility": "public",
-  "url": "https://github.com/viam-labs/apriltag",
-  "description": "Use Apriltags with Viam",
+  "url": "https://github.com/sucrammal/apriltag",
+  "description": "Apriltag pose tracker for Viam, with fixes for reconfigure when unrelated machine resources are disabled",
   "models": [
     {
       "api": "rdk:component:pose_tracker",
-      "model": "viam:apriltag:pose_tracker",
+      "model": "sucrammal:apriltag:pose_tracker",
       "short_description": "A pose tracker component utilizing Apriltags",
       "markdown_link": "README.md"
     }
