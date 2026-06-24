@@ -14,7 +14,7 @@ from typing_extensions import Self
 
 from viam.components.pose_tracker import PoseTracker
 from viam.components.camera import Camera
-from viam.media.video import CameraMimeType
+from viam.media.video import CameraMimeType, ViamImage
 from viam.module.module import Module
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Geometry, PoseInFrame, Pose, ResourceName
@@ -182,6 +182,86 @@ class Apriltag(PoseTracker, EasyResource):
         timeout: Optional[float] = None,
         **kwargs
     ) -> Mapping[str, ValueTypes]:
+        raise NotImplementedError()
+
+
+class ApriltagCamera(Camera, EasyResource):
+    MODEL: ClassVar[Model] = Model(ModelFamily("marcus-org", "apriltag"), "camera")
+
+    @classmethod
+    def validate_config(cls, config: ComponentConfig) -> Tuple[Sequence[str], Sequence[str]]:
+        attrs = struct_to_dict(config.attributes)
+        cam = attrs.get(cam_attr)
+        if cam is None:
+            raise Exception("Missing required " + cam_attr + " attribute.")
+        if attrs.get(family_attr) is None:
+            raise Exception("Missing required " + family_attr + " attribute.")
+        if attrs.get(width_attr) is None:
+            raise Exception("Missing required " + width_attr + " attribute.")
+        return [str(cam)], []
+
+    def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
+        attrs = struct_to_dict(config.attributes)
+        cam_name = str(attrs.get(cam_attr))
+        self.camera = cast(Camera, dependencies[Camera.get_resource_name(cam_name)])
+        self.tag_family = attrs.get(family_attr)
+        self.tag_width_mm = attrs.get(width_attr)
+
+    async def get_image(
+        self,
+        mime_type: str = "",
+        *,
+        extra: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+        **kwargs,
+    ) -> ViamImage:
+        properties = await self.camera.get_properties()
+        intrinsics = [
+            properties.intrinsic_parameters.focal_x_px,
+            properties.intrinsic_parameters.focal_y_px,
+            properties.intrinsic_parameters.center_x_px,
+            properties.intrinsic_parameters.center_y_px,
+        ]
+
+        cam_images, _ = await self.camera.get_images()
+        source = None
+        for img in cam_images:
+            if img.mime_type == CameraMimeType.JPEG:
+                source = img
+                break
+        if source is None:
+            raise Exception("camera had no JPEG images")
+
+        pil_img = viam_to_pil_image(source)
+        bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+        detector = apriltag.Detector(families=self.tag_family)
+        tags = detector.detect(
+            gray, estimate_tag_pose=True, camera_params=intrinsics, tag_size=0.001 * self.tag_width_mm
+        )
+
+        for tag in tags:
+            corners = tag.corners.astype(int)
+            cv2.polylines(bgr, [corners], isClosed=True, color=(0, 255, 0), thickness=2)
+            center = (int(tag.center[0]), int(tag.center[1]))
+            cv2.circle(bgr, center, 5, (0, 0, 255), -1)
+            cv2.putText(bgr, f"ID:{tag.tag_id}", (center[0] + 8, center[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+        _, jpeg_bytes = cv2.imencode(".jpg", bgr)
+        return ViamImage(jpeg_bytes.tobytes(), CameraMimeType.JPEG)
+
+    async def get_images(self, *, extra=None, timeout=None, **kwargs):
+        img = await self.get_image(timeout=timeout, extra=extra)
+        return [img], None
+
+    async def get_properties(self, *, extra=None, timeout=None, **kwargs):
+        return await self.camera.get_properties()
+
+    async def get_point_cloud(self, *, extra=None, timeout=None, **kwargs):
+        raise NotImplementedError()
+
+    async def get_geometries(self, *, extra=None, timeout=None):
         raise NotImplementedError()
 
 

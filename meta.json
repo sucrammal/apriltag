@@ -10,6 +10,12 @@
 			"model": "marcus-org:apriltag:pose_tracker",
 			"short_description": "A pose tracker component utilizing Apriltags",
 			"markdown_link": "README.md"
+		},
+		{
+			"api": "rdk:component:camera",
+			"model": "marcus-org:apriltag:camera",
+			"short_description": "Annotated camera feed showing detected Apriltag outlines and IDs",
+			"markdown_link": "README.md"
 		}
 	],
 	"entrypoint": "run.sh",
