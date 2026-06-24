@@ -182,7 +182,24 @@ class Apriltag(PoseTracker, EasyResource):
         timeout: Optional[float] = None,
         **kwargs
     ) -> Mapping[str, ValueTypes]:
-        raise NotImplementedError()
+        cmd = dict(command)
+        if "get_poses" in cmd:
+            body_names = cmd["get_poses"] if isinstance(cmd["get_poses"], list) else []
+            poses = await self.get_poses(body_names, timeout=timeout)
+            return {
+                tag_id: {
+                    "x": p.pose.x,
+                    "y": p.pose.y,
+                    "z": p.pose.z,
+                    "o_x": p.pose.o_x,
+                    "o_y": p.pose.o_y,
+                    "o_z": p.pose.o_z,
+                    "theta": p.pose.theta,
+                    "reference_frame": p.reference_frame,
+                }
+                for tag_id, p in poses.items()
+            }
+        raise NotImplementedError(f"unknown command: {list(cmd.keys())}")
 
 
 class ApriltagCamera(Camera, EasyResource):
@@ -215,31 +232,20 @@ class ApriltagCamera(Camera, EasyResource):
         timeout: Optional[float] = None,
         **kwargs,
     ) -> ViamImage:
-        properties = await self.camera.get_properties()
-        intrinsics = [
-            properties.intrinsic_parameters.focal_x_px,
-            properties.intrinsic_parameters.focal_y_px,
-            properties.intrinsic_parameters.center_x_px,
-            properties.intrinsic_parameters.center_y_px,
-        ]
-
         cam_images, _ = await self.camera.get_images()
-        source = None
-        for img in cam_images:
-            if img.mime_type == CameraMimeType.JPEG:
-                source = img
-                break
+        source = next((img for img in cam_images if img.mime_type == CameraMimeType.JPEG), None)
+        if source is None and cam_images:
+            source = cam_images[0]
         if source is None:
-            raise Exception("camera had no JPEG images")
+            raise Exception("camera returned no images")
 
         pil_img = viam_to_pil_image(source)
         bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
+        # no pose estimation needed for visual overlay — avoids requiring calibrated intrinsics
         detector = apriltag.Detector(families=self.tag_family)
-        tags = detector.detect(
-            gray, estimate_tag_pose=True, camera_params=intrinsics, tag_size=0.001 * self.tag_width_mm
-        )
+        tags = detector.detect(gray)
 
         for tag in tags:
             corners = tag.corners.astype(int)
