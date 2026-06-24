@@ -14,7 +14,8 @@ from typing_extensions import Self
 
 from viam.components.pose_tracker import PoseTracker
 from viam.components.camera import Camera
-from viam.media.video import CameraMimeType, ViamImage
+from viam.media.video import CameraMimeType, NamedImage
+from viam.proto.common import ResponseMetadata
 from viam.module.module import Module
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Geometry, PoseInFrame, Pose, ResourceName
@@ -155,7 +156,7 @@ class Apriltag(PoseTracker, EasyResource):
                             theta=o.theta * 180 / math.pi
                         )
                     )        
-            time = datetime.datetime.utcnow().isoformat() + "Z"
+            time = datetime.datetime.now(datetime.timezone.utc).isoformat()
             viam_home = os.getenv("VIAM_HOME")
             if viam_home is None:
                 raise Exception("VIAM_HOME not set")
@@ -224,26 +225,30 @@ class ApriltagCamera(Camera, EasyResource):
         self.tag_family = attrs.get(family_attr)
         self.tag_width_mm = attrs.get(width_attr)
 
-    async def get_image(
+    async def get_images(
         self,
-        mime_type: str = "",
         *,
-        extra: Optional[Mapping[str, Any]] = None,
+        filter_source_names: Optional[Sequence[str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = None,
         **kwargs,
-    ) -> ViamImage:
-        cam_images, _ = await self.camera.get_images()
+    ) -> Tuple[Sequence[NamedImage], ResponseMetadata]:
+        try:
+            cam_images, metadata = await self.camera.get_images(timeout=timeout)
+        except Exception as e:
+            LOGGER.error("ApriltagCamera.get_images: failed to get images from source camera: %s", e)
+            raise
+
         source = next((img for img in cam_images if img.mime_type == CameraMimeType.JPEG), None)
         if source is None and cam_images:
             source = cam_images[0]
         if source is None:
-            raise Exception("camera returned no images")
+            raise Exception("source camera returned no images")
 
         pil_img = viam_to_pil_image(source)
         bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
-        # no pose estimation needed for visual overlay — avoids requiring calibrated intrinsics
         detector = apriltag.Detector(families=self.tag_family)
         tags = detector.detect(gray)
 
@@ -255,11 +260,8 @@ class ApriltagCamera(Camera, EasyResource):
             cv2.putText(bgr, f"ID:{tag.tag_id}", (center[0] + 8, center[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         _, jpeg_bytes = cv2.imencode(".jpg", bgr)
-        return ViamImage(jpeg_bytes.tobytes(), CameraMimeType.JPEG)
-
-    async def get_images(self, *, extra=None, timeout=None, **kwargs):
-        img = await self.get_image(timeout=timeout, extra=extra)
-        return [img], None
+        named = NamedImage(name=self.name, data=jpeg_bytes.tobytes(), mime_type=CameraMimeType.JPEG)
+        return [named], metadata
 
     async def get_properties(self, *, extra=None, timeout=None, **kwargs):
         return await self.camera.get_properties()
