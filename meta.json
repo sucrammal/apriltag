@@ -1,21 +1,20 @@
 {
-  "$schema": "https://dl.viam.dev/module.schema.json",
-  "module_id": "sucrammal:apriltag",
-  "visibility": "public",
-  "url": "https://github.com/sucrammal/apriltag",
-  "description": "Apriltag pose tracker for Viam, with fixes for reconfigure when unrelated machine resources are disabled",
-  "models": [
-    {
-      "api": "rdk:component:pose_tracker",
-      "model": "sucrammal:apriltag:pose_tracker",
-      "short_description": "A pose tracker component utilizing Apriltags",
-      "markdown_link": "README.md"
-    }
-  ],
-  "entrypoint": "run.sh",
-  "build": {
-    "arch": ["linux/arm64", "linux/amd64"],
-    "build": "make module.tar.gz"
-  } 
-
+	"$schema": "https://dl.viam.dev/module.schema.json",
+	"module_id": "marcus-org:apriltag",
+	"visibility": "private",
+	"url": "https://github.com/sucrammal/apriltag",
+	"description": "Apriltag pose tracker for Viam, with fixes for reconfigure when unrelated machine resources are disabled",
+	"models": [
+		{
+			"api": "rdk:component:pose_tracker",
+			"model": "marcus-org:apriltag:pose_tracker",
+			"short_description": "A pose tracker component utilizing Apriltags",
+			"markdown_link": "README.md"
+		}
+	],
+	"entrypoint": "run.sh",
+	"build": {
+		"arch": ["linux/arm64", "linux/amd64"],
+		"build": "make module.tar.gz"
+	}
 }

@@ -1,13 +1,16 @@
-# [`apriltag` module](https://app.viam.com/module/sucrammal/apriltag)
+# `apriltag` module
 
 A Viam module that uses apriltags as an implementation for a PoseTracker component.
 
 Fork of [viam-labs/apriltag](https://github.com/viam-labs/apriltag) with fixes for module reconfigure when unrelated machine resources are disabled.
 
+**Module:** [marcus-org/apriltag](https://app.viam.com/module/marcus-org/apriltag)  
+**Model:** `marcus-org:apriltag:pose_tracker`
+
 ## Configuration and Usage
 
 Navigate to the [**CONFIGURE** tab](https://docs.viam.com/build/configure/) of your [machine](https://docs.viam.com/fleet/machines/) in [the Viam app](https://app.viam.com/).
-[Add a pose tracker component](https://docs.viam.com/build/configure/#components) using model **`sucrammal:apriltag:pose_tracker`**.
+[Add a pose tracker component](https://docs.viam.com/build/configure/#components) using model **`marcus-org:apriltag:pose_tracker`**.
 
 On the new component panel, copy and paste the following attribute template into your component's attributes field, editing the attributes as applicable:
 

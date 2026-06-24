@@ -66,7 +66,7 @@ class ApriltagModule(Module):
 
 
 class Apriltag(PoseTracker, EasyResource):
-    MODEL: ClassVar[Model] = Model(ModelFamily("sucrammal", "apriltag"), "pose_tracker")
+    MODEL: ClassVar[Model] = Model(ModelFamily("marcus-org", "apriltag"), "pose_tracker")
 
     @classmethod
     def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
