@@ -207,6 +207,12 @@ class ApriltagCamera(Camera, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily("marcus-org", "apriltag"), "camera")
 
     @classmethod
+    def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
+        instance = super().new(config, dependencies)
+        instance.reconfigure(config, dependencies)
+        return instance
+
+    @classmethod
     def validate_config(cls, config: ComponentConfig) -> Tuple[Sequence[str], Sequence[str]]:
         attrs = struct_to_dict(config.attributes)
         cam = attrs.get(cam_attr)
