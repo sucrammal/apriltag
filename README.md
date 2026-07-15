@@ -116,8 +116,12 @@ From the module root, with the [Viam CLI](https://docs.viam.com/cli/) authentica
 make module.tar.gz
 
 # 2. Upload for each platform your meta.json declares
-viam module upload --version 0.2.3 --platform linux/amd64 --upload module.tar.gz
-viam module upload --version 0.2.3 --platform linux/arm64 --upload module.tar.gz
+viam module upload --version 0.2.6 --platform linux/amd64 --upload module.tar.gz
+viam module upload --version 0.2.6 --platform linux/arm64 --upload module.tar.gz
+
+# Alternative: push to a machine via cloud build (run.sh must NOT be executable in git)
+# chmod -x run.sh   # required — executable run.sh makes cloud build skip packaging
+# viam module reload --part-id <your-part-id>
 
 # 3. Optional: refresh module metadata on the registry
 viam module update --module ./meta.json
