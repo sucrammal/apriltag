@@ -1,7 +1,7 @@
 {
 	"$schema": "https://dl.viam.dev/module.schema.json",
 	"module_id": "marcus-org:apriltag",
-	"visibility": "private",
+	"visibility": "public",
 	"url": "https://github.com/sucrammal/apriltag",
 	"description": "Apriltag pose tracker for Viam, with fixes for reconfigure when unrelated machine resources are disabled",
 	"models": [
@@ -15,6 +15,12 @@
 			"api": "rdk:component:camera",
 			"model": "marcus-org:apriltag:camera",
 			"short_description": "Annotated camera feed showing detected Apriltag outlines and IDs",
+			"markdown_link": "README.md"
+		},
+		{
+			"api": "rdk:service:vision",
+			"model": "marcus-org:apriltag:vision",
+			"short_description": "2D AprilTag detector for detections-to-segments 3D segmentation",
 			"markdown_link": "README.md"
 		}
 	],
