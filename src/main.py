@@ -1,19 +1,12 @@
-import os
-import datetime
 import asyncio
+import math
+
 import dt_apriltags as apriltag
 import numpy as np
 import cv2
-import math
 
 from scipy.spatial.transform import Rotation
 from .spatialmath import quaternion_to_orientation_vector
-from .pcd_utils import (
-    filter_points_in_bbox,
-    read_pcd_xyz,
-    segment_geometry,
-    write_pcd_xyz,
-)
 
 from typing import (Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple, cast)
 from typing_extensions import Self
@@ -24,8 +17,8 @@ from viam.media.video import CameraMimeType, NamedImage, ViamImage
 from viam.proto.common import ResponseMetadata
 from viam.module.module import Module
 from viam.proto.app.robot import ComponentConfig
-from viam.proto.common import Geometry, GeometriesInFrame, PointCloudObject, PoseInFrame, Pose, ResourceName
-from viam.proto.service.vision import Detection, GetPropertiesResponse
+from viam.proto.common import Geometry, PointCloudObject, PoseInFrame, Pose, ResourceName
+from viam.proto.service.vision import Classification, Detection, GetPropertiesResponse
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
 from viam.resource.registry import Registry
@@ -35,7 +28,6 @@ from viam.logging import getLogger
 from viam.services.vision import CaptureAllResult, Vision
 from viam.utils import struct_to_dict, ValueTypes
 from viam.media.utils.pil import viam_to_pil_image
-from PIL import Image
 
 
 # required attributes
@@ -44,7 +36,6 @@ family_attr = "tag_family"
 width_attr = "tag_width_mm"
 confidence_threshold_attr = "confidence_threshold_pct"
 bbox_padding_attr = "bbox_padding_px"
-min_segment_points_attr = "min_segment_points"
 
 LOGGER = getLogger(__name__)
 
@@ -103,15 +94,6 @@ def _tag_confidence(tag: Any) -> float:
         return 1.0
     # decision_margin is commonly 20-150; map so good tags clear segmenter defaults.
     return float(min(max(margin / 40.0, 0.0), 1.0))
-
-
-def _parse_optional_float(attrs: Mapping[str, Any], key: str, default: float) -> float:
-    value = attrs.get(key, default)
-    if value is None:
-        return default
-    if not isinstance(value, (int, float)):
-        raise Exception(f"{key} must be a number")
-    return float(value)
 
 
 def _parse_optional_int(attrs: Mapping[str, Any], key: str, default: int) -> int:
@@ -270,68 +252,46 @@ class Apriltag(PoseTracker, EasyResource):
         Returns:
             Dict[str, PoseInFrame]: A dictionary mapping Apriltag ID strings to their detected PoseInFrame
         """
-        try:
-            # need to get the camera intrinsics
-            properties = await self.camera.get_properties()
-            intrinsics = [
-                properties.intrinsic_parameters.focal_x_px,
-                properties.intrinsic_parameters.focal_y_px,
-                properties.intrinsic_parameters.center_x_px,
-                properties.intrinsic_parameters.center_y_px
-            ]
+        properties = await self.camera.get_properties(timeout=timeout)
+        intr = properties.intrinsic_parameters
+        intrinsics = [
+            intr.focal_x_px,
+            intr.focal_y_px,
+            intr.center_x_px,
+            intr.center_y_px,
+        ]
 
-            # get an image from camera resource and convert it to OpenCV format
-            cam_images = await self.camera.get_images()
-            gray_image = None
-            color_image = None
-            for image in cam_images[0]:
-                if image.mime_type == CameraMimeType.JPEG:
-                    color_image = cam_images[0][0].data
-                    gray_image = cv2.cvtColor(np.array(viam_to_pil_image(cam_images[0][0])), cv2.COLOR_RGB2GRAY)  # convert to grayscale
+        cam_images, _ = await self.camera.get_images(timeout=timeout)
+        source = _color_image_from_camera_images(cam_images)
+        gray_image, _, _ = _gray_from_viam_image(source)
 
-            if gray_image is None or color_image is None:
-                raise Exception("camera had no jpeg images")
-                
+        detector = apriltag.Detector(families=self.tag_family)
+        tags = detector.detect(
+            gray_image,
+            estimate_tag_pose=True,
+            camera_params=intrinsics,
+            tag_size=0.001 * self.tag_width_mm,
+        )
 
-            # initialize AprilTag detector - can include multiple families of tags in comma separated string
-            detector = apriltag.Detector(families=self.tag_family)
-            tags = detector.detect(gray_image, estimate_tag_pose=True, camera_params=intrinsics, tag_size=0.001*self.tag_width_mm)
+        poses: Dict[str, PoseInFrame] = {}
+        for tag in tags:
+            if len(body_names) == 0 or str(tag.tag_id) in body_names:
+                o = quaternion_to_orientation_vector(Rotation.from_matrix(tag.pose_R))
+                # positions are in meters (convert to mm); theta from radians to degrees.
+                poses[str(tag.tag_id)] = PoseInFrame(
+                    reference_frame=self.camera.name,
+                    pose=Pose(
+                        x=tag.pose_t[0][0] * 1000,
+                        y=tag.pose_t[1][0] * 1000,
+                        z=tag.pose_t[2][0] * 1000,
+                        o_x=o.o_x,
+                        o_y=o.o_y,
+                        o_z=o.o_z,
+                        theta=o.theta * 180 / math.pi,
+                    ),
+                )
+        return poses
 
-            poses = {}
-            for tag in tags:
-                #
-                if len(body_names) == 0 or str(tag.tag_id) in body_names:
-                    o = quaternion_to_orientation_vector(Rotation.from_matrix(tag.pose_R))
-                    # need to convert the returned positions from mm to m and the orientation's theta to degrees.
-                    poses[str(tag.tag_id)] = PoseInFrame(
-                        reference_frame=self.camera.name, 
-                        pose=Pose(
-                            x=tag.pose_t[0][0] * 1000,
-                            y=tag.pose_t[1][0] * 1000,
-                            z=tag.pose_t[2][0] * 1000, 
-                            o_x=o.o_x,
-                            o_y=o.o_y,
-                            o_z=o.o_z,
-                            theta=o.theta * 180 / math.pi
-                        )
-                    )        
-            time = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            viam_home = os.getenv("VIAM_HOME")
-            if viam_home is None:
-                raise Exception("VIAM_HOME not set")
-
-            capturedir = os.path.join(viam_home,"capture")
-            root_path = os.path.join(capturedir,self.name,time)
-            os.makedirs(root_path)
-            with open(os.path.join(root_path, "./color_image.jpeg"), 'wb') as f:
-                f.write(color_image)
-            im = Image.fromarray(gray_image)
-            im.save(os.path.join(root_path, "./gray_image.jpeg"))
-            return poses
-                
-        except Exception as e:
-            raise e
-        
     async def get_geometries(self, *, extra: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> List[Geometry]:
         raise NotImplementedError()
 
@@ -404,11 +364,7 @@ class ApriltagCamera(Camera, EasyResource):
             LOGGER.error("ApriltagCamera.get_images: failed to get images from source camera: %s", e)
             raise
 
-        source = next((img for img in cam_images if img.mime_type == CameraMimeType.JPEG), None)
-        if source is None and cam_images:
-            source = cam_images[0]
-        if source is None:
-            raise Exception("source camera returned no images")
+        source = _color_image_from_camera_images(cam_images)
 
         pil_img = viam_to_pil_image(source)
         bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
@@ -438,7 +394,13 @@ class ApriltagCamera(Camera, EasyResource):
 
 
 class ApriltagVision(Vision, EasyResource):
-    """2D AprilTag detector for use with viam:vision:detections-to-segments."""
+    """2D AprilTag detector.
+
+    Implements the Vision service detection API. Each detected tag becomes a
+    Detection whose class_name is the tag ID. Pair this with
+    viam:vision:detections-to-segments (which calls get_detections) to produce
+    3D point-cloud segments from a depth camera.
+    """
 
     MODEL: ClassVar[Model] = Model(ModelFamily("marcus-org", "apriltag"), "vision")
 
@@ -457,8 +419,7 @@ class ApriltagVision(Vision, EasyResource):
         if attrs.get(family_attr) is None:
             raise Exception("Missing required " + family_attr + " attribute.")
         _parse_confidence_threshold(attrs)
-        _parse_optional_int(attrs, bbox_padding_attr, 40)
-        _parse_optional_int(attrs, min_segment_points_attr, 3)
+        _parse_optional_int(attrs, bbox_padding_attr, 0)
         return [str(cam)], []
 
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
@@ -467,19 +428,20 @@ class ApriltagVision(Vision, EasyResource):
         self.camera = cast(Camera, dependencies[Camera.get_resource_name(cam_name)])
         self.tag_family = attrs.get(family_attr)
         self.confidence_threshold_pct = _parse_confidence_threshold(attrs)
-        # Padded boxes for GetDetections (used by detections-to-segments).
-        self.bbox_padding_px = _parse_optional_int(attrs, bbox_padding_attr, 40)
-        self.min_segment_points = _parse_optional_int(attrs, min_segment_points_attr, 3)
+        self.bbox_padding_px = _parse_optional_int(attrs, bbox_padding_attr, 0)
 
-    def _camera_for_request(self, camera_name: str) -> Camera:
-        if camera_name != self.camera.name:
-            raise Exception(
-                f"this detector is configured for camera {self.camera.name!r}, "
-                f"got request for {camera_name!r}. "
-                f"When using detections-to-segments with crop-camera, set camera_name to "
-                f"'crop-camera' on the detector too."
-            )
-        return self.camera
+    async def _detections_from_camera(self, timeout: Optional[float]) -> List[Detection]:
+        cam_images, _ = await self.camera.get_images(timeout=timeout)
+        source = _color_image_from_camera_images(cam_images)
+        gray, width, height = _gray_from_viam_image(source)
+        tags = _detect_apriltags(gray, self.tag_family)
+        return _tags_to_detections(
+            tags,
+            width,
+            height,
+            confidence_threshold_pct=self.confidence_threshold_pct,
+            bbox_padding_px=self.bbox_padding_px,
+        )
 
     async def get_properties(
         self,
@@ -491,7 +453,7 @@ class ApriltagVision(Vision, EasyResource):
         return GetPropertiesResponse(
             classifications_supported=False,
             detections_supported=True,
-            object_point_clouds_supported=True,
+            object_point_clouds_supported=False,
         )
 
     async def get_detections_from_camera(
@@ -502,18 +464,7 @@ class ApriltagVision(Vision, EasyResource):
         timeout: Optional[float] = None,
         **kwargs,
     ) -> List[Detection]:
-        camera = self._camera_for_request(camera_name)
-        cam_images, _ = await camera.get_images(timeout=timeout)
-        source = _color_image_from_camera_images(cam_images)
-        gray, width, height = _gray_from_viam_image(source)
-        tags = _detect_apriltags(gray, self.tag_family)
-        return _tags_to_detections(
-            tags,
-            width,
-            height,
-            confidence_threshold_pct=self.confidence_threshold_pct,
-            bbox_padding_px=0,
-        )
+        return await self._detections_from_camera(timeout)
 
     async def get_detections(
         self,
@@ -523,7 +474,6 @@ class ApriltagVision(Vision, EasyResource):
         timeout: Optional[float] = None,
         **kwargs,
     ) -> List[Detection]:
-        """Return detections with padded bboxes for detections-to-segments."""
         gray, width, height = _gray_from_viam_image(image)
         tags = _detect_apriltags(gray, self.tag_family)
         return _tags_to_detections(
@@ -534,6 +484,28 @@ class ApriltagVision(Vision, EasyResource):
             bbox_padding_px=self.bbox_padding_px,
         )
 
+    async def get_classifications_from_camera(
+        self,
+        camera_name: str,
+        count: int,
+        *,
+        extra: Optional[Mapping[str, ValueTypes]] = None,
+        timeout: Optional[float] = None,
+        **kwargs,
+    ) -> List[Classification]:
+        raise NotImplementedError()
+
+    async def get_classifications(
+        self,
+        image: ViamImage,
+        count: int,
+        *,
+        extra: Optional[Mapping[str, ValueTypes]] = None,
+        timeout: Optional[float] = None,
+        **kwargs,
+    ) -> List[Classification]:
+        raise NotImplementedError()
+
     async def get_object_point_clouds(
         self,
         camera_name: str,
@@ -542,55 +514,7 @@ class ApriltagVision(Vision, EasyResource):
         timeout: Optional[float] = None,
         **kwargs,
     ) -> List[PointCloudObject]:
-        camera = self._camera_for_request(camera_name)
-        props = await camera.get_properties(timeout=timeout)
-        intr = props.intrinsic_parameters
-        if intr is None:
-            raise Exception("camera must provide intrinsic parameters for 3D segmentation")
-        intrinsics = (
-            intr.focal_x_px,
-            intr.focal_y_px,
-            intr.center_x_px,
-            intr.center_y_px,
-        )
-
-        cam_images, _ = await camera.get_images(timeout=timeout)
-        source = _color_image_from_camera_images(cam_images)
-        gray, width, height = _gray_from_viam_image(source)
-        tags = _detect_apriltags(gray, self.tag_family)
-        detections = _tags_to_detections(
-            tags,
-            width,
-            height,
-            confidence_threshold_pct=self.confidence_threshold_pct,
-            bbox_padding_px=self.bbox_padding_px,
-        )
-
-        pcd_bytes, _ = await camera.get_point_cloud(timeout=timeout)
-        all_points = read_pcd_xyz(pcd_bytes)
-
-        objects: List[PointCloudObject] = []
-        for det in detections:
-            segment = filter_points_in_bbox(
-                all_points,
-                intrinsics,
-                int(det.x_min),
-                int(det.y_min),
-                int(det.x_max),
-                int(det.y_max),
-            )
-            if segment.shape[0] < self.min_segment_points:
-                continue
-            objects.append(
-                PointCloudObject(
-                    point_cloud=write_pcd_xyz(segment),
-                    geometries=GeometriesInFrame(
-                        reference_frame=camera_name,
-                        geometries=[segment_geometry(segment, det.class_name)],
-                    ),
-                )
-            )
-        return objects
+        raise NotImplementedError()
 
     async def capture_all_from_camera(
         self,
@@ -604,48 +528,29 @@ class ApriltagVision(Vision, EasyResource):
         timeout: Optional[float] = None,
         **kwargs,
     ) -> CaptureAllResult:
-        if return_classifications:
-            raise NotImplementedError()
+        image: Optional[ViamImage] = None
+        detections: Optional[List[Detection]] = None
 
-        detections = None
-        image = None
-        objects = None
-        if return_detections:
-            detections = await self.get_detections_from_camera(
-                camera_name, extra=extra, timeout=timeout
-            )
-        if return_object_point_clouds:
-            objects = await self.get_object_point_clouds(
-                camera_name, extra=extra, timeout=timeout
-            )
-        if return_image:
-            camera = self._camera_for_request(camera_name)
-            cam_images, _ = await camera.get_images(timeout=timeout)
+        # Only touch the camera once if either the image or detections are needed.
+        if return_image or return_detections:
+            cam_images, _ = await self.camera.get_images(timeout=timeout)
             source = _color_image_from_camera_images(cam_images)
-            image = ViamImage(source.data, source.mime_type)
-        return CaptureAllResult(image=image, detections=detections, objects=objects)
+            if return_image:
+                image = ViamImage(source.data, source.mime_type)
+            if return_detections:
+                gray, width, height = _gray_from_viam_image(source)
+                tags = _detect_apriltags(gray, self.tag_family)
+                detections = _tags_to_detections(
+                    tags,
+                    width,
+                    height,
+                    confidence_threshold_pct=self.confidence_threshold_pct,
+                    bbox_padding_px=self.bbox_padding_px,
+                )
 
-    async def get_classifications_from_camera(
-        self,
-        camera_name: str,
-        count: int,
-        *,
-        extra: Optional[Mapping[str, ValueTypes]] = None,
-        timeout: Optional[float] = None,
-        **kwargs,
-    ) -> List[Any]:
-        raise NotImplementedError()
-
-    async def get_classifications(
-        self,
-        image: ViamImage,
-        count: int,
-        *,
-        extra: Optional[Mapping[str, ValueTypes]] = None,
-        timeout: Optional[float] = None,
-        **kwargs,
-    ) -> List[Any]:
-        raise NotImplementedError()
+        # Unsupported features return None rather than raising, so the combined
+        # Control tab view (which requests everything) stays healthy.
+        return CaptureAllResult(image=image, detections=detections)
 
 
 async def run_module():

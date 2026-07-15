@@ -34,7 +34,7 @@ Navigate to the [**CONFIGURE** tab](https://docs.viam.com/build/configure/) of y
 
 Use **`marcus-org:apriltag:vision`** as the 2D detector, then wire it into **`viam:vision:detections-to-segments`** for 3D.
 
-The detector returns **tight boxes** in the Control tab (`GetDetectionsFromCamera`), but **padded boxes** on `GetDetections` — the path `detections-to-segments` uses. Set `bbox_padding_px` to grow each tag bbox before 3D projection.
+`marcus-org:apriltag:vision` is a pure 2D detector: it implements the Vision service detection API (`GetDetections`, `GetDetectionsFromCamera`, `CaptureAllFromCamera`, `GetProperties`) and reports `detections_supported = true`, `classifications_supported = false`, `object_point_clouds_supported = false`. The documented way to get 3D is to feed it into `viam:vision:detections-to-segments`, which calls `GetDetections` and projects the boxes onto the depth camera's point cloud. Because AprilTags are small, set `bbox_padding_px` to grow each tag bbox so the segmenter has enough depth points to work with (this padding applies consistently to every detection path).
 
 **1. Detector** (`marcus-org:apriltag:vision`):
 
@@ -51,6 +51,9 @@ The detector returns **tight boxes** in the Control tab (`GetDetectionsFromCamer
   }
 }
 ```
+
+> [!IMPORTANT]  
+> Set the detector's `camera_name` to the **same camera** the segmenter uses (`crop-camera` here). `detections-to-segments` calls `GetDetections` with an image from its own `camera_name`, so the detector and segmenter must agree on the source camera for the 2D boxes to line up with the point cloud.
 
 **2. Segmenter** (`viam:vision:detections-to-segments`):
 
@@ -75,13 +78,6 @@ vision = VisionClient.from_robot(robot, "apriltag-segment")
 objects = await vision.get_object_point_clouds("crop-camera")
 ```
 
-<details>
-<summary>Alternative: native 3D on the detector (skip detections-to-segments)</summary>
-
-The same vision model also implements `GetObjectPointClouds` directly. Use this if `detections-to-segments` still returns empty segments.
-
-</details>
-
 Each object's `geometries.geometries[0].label` is the tag ID string; `center` is the 3D point in the camera frame.
 
 > [!NOTE]  
@@ -95,8 +91,7 @@ Each object's `geometries.geometries[0].label` is the tag ID string; `center` is
 | `tag_family` | string | **Required** | The Apriltag 'tag family' to detect. |
 | `tag_width_mm` | float | Required for pose tracker / camera | Tag width in mm (corner to corner). Not used by the vision detector. |
 | `confidence_threshold_pct` | float | Optional (vision only) | Detections below this confidence are dropped. Range `0.0`–`1.0`. Default `0.0`. Confidence is `decision_margin / 40`, capped at `1.0`. |
-| `bbox_padding_px` | int | Optional (vision only) | Pixels to expand each bbox on **`GetDetections`** (the path used by `detections-to-segments`). Default `40`. `GetDetectionsFromCamera` always returns tight tag boxes. |
-| `min_segment_points` | int | Optional (vision only) | Minimum depth points required to emit a 3D segment. Default `3`. |
+| `bbox_padding_px` | int | Optional (vision only) | Pixels to expand each detection bbox on every side. Helps `detections-to-segments` capture enough depth points around small tags. Default `0`. |
 
 > [!NOTE]
 > `crop-camera` (or whichever depth camera you use) must support point clouds (`supports_pcd: true`).
@@ -116,8 +111,8 @@ From the module root, with the [Viam CLI](https://docs.viam.com/cli/) authentica
 make module.tar.gz
 
 # 2. Upload for each platform your meta.json declares
-viam module upload --version 0.2.6 --platform linux/amd64 --upload module.tar.gz
-viam module upload --version 0.2.6 --platform linux/arm64 --upload module.tar.gz
+viam module upload --version 0.3.0 --platform linux/amd64 --upload module.tar.gz
+viam module upload --version 0.3.0 --platform linux/arm64 --upload module.tar.gz
 
 # Alternative: push to a machine via cloud build (run.sh must NOT be executable in git)
 # chmod -x run.sh   # required — executable run.sh makes cloud build skip packaging
