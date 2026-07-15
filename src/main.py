@@ -80,12 +80,37 @@ def _gray_from_viam_image(image: ViamImage) -> tuple[np.ndarray, int, int]:
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     width = int(image.width or rgb.shape[1])
     height = int(image.height or rgb.shape[0])
+    # dt_apriltags' native code indexes the buffer directly; a non-contiguous or
+    # non-uint8 array reads out of bounds and corrupts the heap (free(): invalid
+    # pointer). Force a contiguous uint8 buffer before handing it to the detector.
+    gray = np.ascontiguousarray(gray, dtype=np.uint8)
     return gray, width, height
 
 
-def _detect_apriltags(gray_image: np.ndarray, tag_family: str) -> list[Any]:
-    detector = apriltag.Detector(families=tag_family)
-    return list(detector.detect(gray_image))
+# dt_apriltags.Detector wraps a native C detector whose __del__ frees the tag
+# family. Creating a new detector per call and letting it be garbage-collected
+# churns those native allocations and triggers a double-free (free(): invalid
+# pointer) that crashes the whole module process. Each resource instead builds
+# its detector once in reconfigure() and reuses it here.
+def _detect_apriltags(
+    detector: "apriltag.Detector",
+    gray_image: np.ndarray,
+    *,
+    estimate_tag_pose: bool = False,
+    camera_params: Optional[Sequence[float]] = None,
+    tag_size: Optional[float] = None,
+) -> list[Any]:
+    gray = np.ascontiguousarray(gray_image, dtype=np.uint8)
+    if estimate_tag_pose:
+        return list(
+            detector.detect(
+                gray,
+                estimate_tag_pose=True,
+                camera_params=camera_params,
+                tag_size=tag_size,
+            )
+        )
+    return list(detector.detect(gray))
 
 
 def _tag_confidence(tag: Any) -> float:
@@ -234,6 +259,7 @@ class Apriltag(PoseTracker, EasyResource):
         self.camera = cast(Camera, dependencies[Camera.get_resource_name(cam_name)])
         self.tag_family = attrs.get(family_attr)
         self.tag_width_mm = attrs.get(width_attr)
+        self.detector = apriltag.Detector(families=self.tag_family)
 
     async def get_poses(
         self,
@@ -265,8 +291,8 @@ class Apriltag(PoseTracker, EasyResource):
         source = _color_image_from_camera_images(cam_images)
         gray_image, _, _ = _gray_from_viam_image(source)
 
-        detector = apriltag.Detector(families=self.tag_family)
-        tags = detector.detect(
+        tags = _detect_apriltags(
+            self.detector,
             gray_image,
             estimate_tag_pose=True,
             camera_params=intrinsics,
@@ -349,6 +375,7 @@ class ApriltagCamera(Camera, EasyResource):
         self.camera = cast(Camera, dependencies[Camera.get_resource_name(cam_name)])
         self.tag_family = attrs.get(family_attr)
         self.tag_width_mm = attrs.get(width_attr)
+        self.detector = apriltag.Detector(families=self.tag_family)
 
     async def get_images(
         self,
@@ -370,10 +397,10 @@ class ApriltagCamera(Camera, EasyResource):
         bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
-        tags = _detect_apriltags(gray, self.tag_family)
+        tags = _detect_apriltags(self.detector, gray)
 
         for tag in tags:
-            corners = tag.corners.astype(int)
+            corners = np.ascontiguousarray(tag.corners, dtype=np.int32)
             cv2.polylines(bgr, [corners], isClosed=True, color=(0, 255, 0), thickness=2)
             center = (int(tag.center[0]), int(tag.center[1]))
             cv2.circle(bgr, center, 5, (0, 0, 255), -1)
@@ -429,12 +456,13 @@ class ApriltagVision(Vision, EasyResource):
         self.tag_family = attrs.get(family_attr)
         self.confidence_threshold_pct = _parse_confidence_threshold(attrs)
         self.bbox_padding_px = _parse_optional_int(attrs, bbox_padding_attr, 0)
+        self.detector = apriltag.Detector(families=self.tag_family)
 
     async def _detections_from_camera(self, timeout: Optional[float]) -> List[Detection]:
         cam_images, _ = await self.camera.get_images(timeout=timeout)
         source = _color_image_from_camera_images(cam_images)
         gray, width, height = _gray_from_viam_image(source)
-        tags = _detect_apriltags(gray, self.tag_family)
+        tags = _detect_apriltags(self.detector, gray)
         return _tags_to_detections(
             tags,
             width,
@@ -475,7 +503,7 @@ class ApriltagVision(Vision, EasyResource):
         **kwargs,
     ) -> List[Detection]:
         gray, width, height = _gray_from_viam_image(image)
-        tags = _detect_apriltags(gray, self.tag_family)
+        tags = _detect_apriltags(self.detector, gray)
         return _tags_to_detections(
             tags,
             width,
@@ -539,7 +567,7 @@ class ApriltagVision(Vision, EasyResource):
                 image = ViamImage(source.data, source.mime_type)
             if return_detections:
                 gray, width, height = _gray_from_viam_image(source)
-                tags = _detect_apriltags(gray, self.tag_family)
+                tags = _detect_apriltags(self.detector, gray)
                 detections = _tags_to_detections(
                     tags,
                     width,
