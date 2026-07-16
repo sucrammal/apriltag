@@ -29,10 +29,13 @@ if ! python3 -m venv $VENV_NAME >/dev/null 2>&1; then
     fi
 fi
 
-# remove -U if viam-sdk should not be upgraded whenever possible
-# -qq suppresses extraneous output from pip
-echo "Virtualenv found/created. Installing/upgrading Python packages..."
-if ! $PYTHON -m pip install -r requirements.txt -Uqq; then
+# -qq suppresses extraneous output from pip. We intentionally do NOT pass -U:
+# with -U pip re-resolves and upgrades every dependency from the network on
+# every module start, which slows restarts and can trip viam-server's config
+# validation deadline. Without -U, already-satisfied requirements are a no-op,
+# so restarts (and hot reloads) are fast and work offline once installed.
+echo "Virtualenv found/created. Installing Python packages..."
+if ! $PYTHON -m pip install -r requirements.txt -qq; then
     exit 1
 fi
 

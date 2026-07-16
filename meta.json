@@ -27,6 +27,7 @@
 	"entrypoint": "run.sh",
 	"build": {
 		"arch": ["linux/arm64", "linux/amd64"],
-		"build": "make module.tar.gz"
+		"build": "make module.tar.gz",
+		"path": "module.tar.gz"
 	}
 }
